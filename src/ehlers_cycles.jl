@@ -8,13 +8,6 @@
 
 using Statistics
 
-macro compute_alpha(x)
-    x = esc(x)
-    quote
-        (cos($x) + sin($x - 1)) / cos($x)
-    end
-end
-
 macro in_range(x, a, b, msgs...)
     msg_body = isempty(msgs) ? x : msgs[1]
     msg = string(msg_body)
@@ -29,13 +22,40 @@ macro in_range(x, a, b, msgs...)
 end
 
 macro check(check, msgs...)
-    msg_body = isempty(msgs) ? x : msgs[1]
+    msg_body = isempty(msgs) ? check : msgs[1]
     msg = string(msg_body)
     quote
         if !$(esc(check))
             throw(ArgumentError($msg))
         end
     end
+end
+
+compute_alpha(x::AbstractFloat) = (cos(x) + sin(x - 1)) / cos(x)
+
+function highpass(in::AbstractArray{<:AbstractFloat},
+                  out::AbstractArray{<:AbstractFloat},
+                  period::Integer,
+                  α::Integer=compute_alpha(2π / period))
+    @check len(out) >= len(in)
+    @inbounds for i = 3:length(in)
+        out[i] = (1 - α / 2) * (in[i] - in[i-1]) + (1 - α) * out[i-1]
+    end
+    nothing
+end
+
+function highpass2(in::AbstractArray{<:AbstractFloat},
+                   out::AbstractArray{<:AbstractFloat},
+                   period::Integer,
+                   α::Integer=compute_alpha(2π/√2 / period))
+    @check len(out) >= len(in)
+    @inbounds for i = 3:length(in)
+        out[i] =
+            (1 - α / 2)^2 * (in[i] - 2in[i-1] + in[i-2])
+        + 2(1 - α) * out[i-1]
+        - (1 - α)^2 * out[i-2]
+    end
+    nothing
 end
 
 """
@@ -54,8 +74,9 @@ smoothing produced by the moving average.
 function SuperSmoother(in::AbstractVector{<:AbstractFloat},
                        out::AbstractVector{<:AbstractFloat},
                        cutoff::Integer)
-    @check length(out) >= length(in) "Output length smaller than input length"
-    @in_range cutoff 5 length(in) "Cutoff must be greater than 5"
+    len = length(in)
+    @check length(out) >= len "Output length smaller than input length"
+    @in_range cutoff 5 len "Cutoff must be greater than 5"
 
     # What is x?
     x = √2π / cutoff
@@ -65,7 +86,7 @@ function SuperSmoother(in::AbstractVector{<:AbstractFloat},
     c2 = b
     c3 = -a^2
     c1 = 1 - c2 - c3
-    @inbounds for i = 3:length(in)
+    @inbounds for i = 3:len
         out[i] = c1 * (in[i] + in[i-1]) / 2 + c2 * out[i-1] + c3 * out[i-2]
     end
     nothing
@@ -86,7 +107,7 @@ function Decycler(in::AbstractArray{<:AbstractFloat},
     @in_range cutoff 10 length(in) "Decycler must have a cutoff period greater than 10"
 
     # Compute α: why is it computed like this??
-    α = @compute_alpha 2π / cutoff
+    α = compute_alpha(2π / cutoff)
 
     @inbounds for i in 2:length(in)
         out[i] = (α / 2) * (in[i] + in[i-1]) + (1 - α) * in[i-1]
@@ -118,17 +139,11 @@ function DecyclerOSC(in::AbstractArray{<:AbstractFloat},
     @in_range long 10 length(in) "Invalid long cutoff"
     @check long > short "Long must be greater than short"
 
-    # Compute α's (Why this formula?)
-    α1 = @compute_alpha 2π/√2 / short
-    α2 = @compute_alpha 2π/√2 / long
-
     HP1 = zeros(length(in))
     HP2 = zeros(length(in))
 
-    @inbounds for i in 3:length(x)
-        HP1[i] = (1 - α1 / 2)^2 * (in[i] - 2in[i-1] + in[i-2]) + 2(1 - α1) * HP1[i-1] - (1 - α1)^2 * HP1[i-2]
-        HP2[i] = (1 - α2 / 2)^2 * (in[i] - 2in[i-1] + in[i-2]) + 2(1 - α2) * HP2[i-1] - (1 - α2)^2 * HP2[i-2]
-    end
+    highpass2(in, HP1, short)
+    highpass2(in, HP2, long)
 
     out .= HP2 .- HP1
     nothing
@@ -146,9 +161,6 @@ function BandPassFilter(in::AbstractArray{<:AbstractFloat};
     @in_range δ 0 1 "δ must be a proportion of period"
     @in_range period 0 length(in) "Period out of bounds"
 
-    # Highpass constants
-    α2 = @compute_alpha δ*π/2 / period
-
     # Bandpass constants
     λ = cos(2π / period);
     γinv = 1 / cos(2π * δ / period)
@@ -157,8 +169,13 @@ function BandPassFilter(in::AbstractArray{<:AbstractFloat};
     # Compute the filters
     HP = zeros(length(in))
     BP = zeros(length(in))
+
+    # Compute highpass
+    α2 = compute_alpha(δ*π/2 / period)
+    compute_highpass(in, HP, period, α2)
+
+    # Compute bandpass
     @inbounds for i in 3:length(x)
-        HP[i] = (1 + α2 / 2) * (in[i] - in[i-1]) + (1 - α2) * HP[i-1] # Highpass
         BP[i] = .5 * (1 - σ) * (HP[i] - HP[i-2]) + λ * (1 + σ) * BP[i-1] - σ * BP[i-2] # Bandpass
     end
 
@@ -187,7 +204,7 @@ function BandPassFilter(in::AbstractArray{<:AbstractFloat};
     end
 
     # Trigger
-    α2 = @compute_alpha 3π * δ / period
+    α2 = compute_alpha(3π * δ / period)
     @inbounds for i = 2:length(x)
         BP_Trigger[i] = (1 + α2 / 2) * (Signal[i] - Signal[i-1]) + (1 - α2) * BP_Trigger[i-1]
     end
@@ -201,88 +218,81 @@ Zero Crossings of the Band-Pass Filter - Equation 5-2
 """
 =#
 
-@doc """
+"""
     HurstCoefficient(x::Array{Float64}; n::Int=30, LPPeriod::Int=20)::Array{Float64}
 
 Hurst Coefficient - Equation 6-1
 """
-function HurstCoefficient(x::Array{Float64}; n::Int=30, LPPeriod::Int=20)::Array{Float64}
-    @check n<size(x,1) && n>0 "Argument n out of bounds."
+function HurstCoefficient(in::AbstractArray{<:AbstractFloat},
+                          out::AbstractArray{<:AbstractFloat},
+                          n::Integer)
+    len = length(in)
+    @check n<len && n>0 "Argument n out of bounds."
     @check iseven(n) "n must be an even number."
-    # Smooth with a Super Smoother Filter from equation 3-3
+
     half_n = Int(n/2)
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
+
     # Find rolling maximum and minimum
-    HH = zeros(size(x,1))
-    LL = zeros(size(x,1))
-    N3 = zeros(size(x,1))
-    @inbounds for i = n:size(x,1)
-    HH[i] = maximum(x[i-n+1:i])
-    LL[i] = minimum(x[i-n+1:i])
-    N3[i] = (HH[i] - LL[i]) / n
+    HH = zeros(len)
+    LL = zeros(len)
+    N3 = zeros(len)
+    @inbounds for i = n:len
+        HH[i] = maximum(x[i-n+1:i])
+        LL[i] = minimum(x[i-n+1:i])
+        N3[i] = (HH[i] - LL[i]) / n
     end
+
     # Rolling min and max half of n
-    HH = zeros(size(x,1))
-    LL = zeros(size(x,1))
-    N1 = zeros(size(x,1))
-    @inbounds for i = half_n:size(x,1)
-    HH[i] = maximum(x[i-half_n+1:i])
-    LL[i] = minimum(x[i-half_n+1:i])
-    N1[i] = (HH[i] - LL[i]) / half_n
+    HH = zeros(len)
+    LL = zeros(len)
+    N1 = zeros(len)
+    @inbounds for i = half_n:len
+        HH[i] = maximum(x[i-half_n+1:i])
+        LL[i] = minimum(x[i-half_n+1:i])
+        N1[i] = (HH[i] - LL[i]) / half_n
     end
+
     # Set trailing close half of n
     HH = [fill(0,half_n); x[1:length(x)-half_n]]
     LL = [fill(0,half_n); x[1:length(x)-half_n]]
-    HH_out = zeros(size(x,1))
-    LL_out = zeros(size(x,1))
-    N2 = zeros(size(x,1))
-    @inbounds for i = half_n:size(x,1)
-    HH_out[i] = maximum(HH[i-half_n+1:i])
-    LL_out[i] = minimum(LL[i-half_n+1:i])
-    N2[i] = (HH_out[i] - LL_out[i])/(half_n)
+    HH_out = zeros(len)
+    LL_out = zeros(len)
+    N2 = zeros(len)
+    @inbounds for i = half_n:len
+        HH_out[i] = maximum(HH[i-half_n+1:i])
+        LL_out[i] = minimum(LL[i-half_n+1:i])
+        N2[i] = (HH_out[i] - LL_out[i])/(half_n)
     end
+
     # Hurst
-    Dimen = zeros(size(x,1))
-    Hurst = zeros(size(x,1))
-    SmoothHurst = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-    if N1[i] > 0 && N2[i] > 0 && N3[i] > 0
-    Dimen[i] = .5*((log(N1[i]+ N2[i]) - log(N3[i])) / log(2) + Dimen[i-1])
-    Hurst[i] = 2 - Dimen[i]
-    SmoothHurst[i] = c1*(Hurst[i] + Hurst[i-1]) / 2 + c2*SmoothHurst[i-1]+ c3*SmoothHurst[i-2];
+    Dimen = zeros(len)
+    Hurst = zeros(len)
+    @inbounds for i = 3:len
+        if N1[i] > 0 && N2[i] > 0 && N3[i] > 0
+            Dimen[i] = .5*((log(N1[i]+ N2[i]) - log(N3[i])) / log(2) + Dimen[i-1])
+            Hurst[i] = 2 - Dimen[i]
+        end
     end
-    end
-    return SmoothHurst
+    SuperSmoother(Hurst, out, LPPeriod)
+    nothing
 end
 
-@doc """
+"""
     HPLPRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
 
 HP LP Roofing Filter - Equation 7-1
 """
 function HPLPRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
+
     # Highpass filter cyclic components whose periods are shorter than 48 bars
-    α = @compute_alpha 2π / HPPeriod
     HP = zeros(size(x,1))
-    @inbounds for i = 2:size(x,1)
-    HP[i] = (1 - α / 2)*(x[i] - x[i-1]) + (1 - α)*HP[i-1]
-    end
+    highpass(x, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)  # may wish to make this an argument in function
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod) # may wish to make this an argument in function
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     LP_HP_Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        LP_HP_Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*LP_HP_Filt[i-1] + c3*LP_HP_Filt[i-2]
-    end
-    return LP_HP_Filt
+    SuperSmoother(HP, LP_HP_Filt, LPPeriod)
+    LP_HP_Filt
 end
 
 @doc """
@@ -293,56 +303,20 @@ K0 = Lag 0
 # Lag 0 Is Most Responsive
 # Ehlers describes using Lag 0 and Lag 1 cross overs/unders as a signal trigger for buying / selling
 """
-function ZeroMeanRoofingFilterK0(x::Array{Float64}; HPPeriod::Int=48, Smooth::Int=10)::Array{Float64}
+function ZeroMeanRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, Smooth::Int=10)::Array{Float64}
     @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
+
     # Highpass filter cyclic components whose periods are shorter than 48 bars
-    α = @compute_alpha 2π / HPPeriod
     HP = zeros(size(x,1))
-    @inbounds for i = 2:size(x,1)
-        HP[i] = (1 - α / 2)*(x[i] - x[i-1]) +(1 - α)*HP[i-1]
-    end
-    #Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / Smooth)
-    b1 = 2*a1*cosd(sqrt(2)*180 / Smooth)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
+    highpass(x, HP, HPPeriod)
+
+    # Smooth with a Super Smoother Filter from equation 3-3
     Zero_Mean_Filt = zeros(size(x,1))
     Zero_Mean_Filt2 = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Zero_Mean_Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Zero_Mean_Filt[i-1] + c3*Zero_Mean_Filt[i-2]
-        Zero_Mean_Filt2[i] = (1 - α / 2)*(Zero_Mean_Filt[i] - Zero_Mean_Filt[i-1]) + (1 - α)*Zero_Mean_Filt2[i-1]
-    end
-    return Zero_Mean_Filt
-end
 
-@doc """
-    ZeroMeanRoofingFilterK1(x::Array{Float64}; HPPeriod::Int=48, Smooth::Int=10)::Array{Float64}
-
-Zero Mean Roofing Filter - Lag 1 - Equation 7-2
-K1 = Lag 1
-"""
-function ZeroMeanRoofingFilterK1(x::Array{Float64}; HPPeriod::Int=48, Smooth::Int=10)::Array{Float64}
-    @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
-    # Highpass filter cyclic components whose periods are shorter than 48 bars
-    α = @compute_alpha 2π / HPPeriod
-    HP = zeros(size(x,1))
-    @inbounds for i = 2:size(x,1)
-        HP[i] = (1 - α / 2)*(x[i] - x[i-1]) +(1 - α)*HP[i-1]
-    end
-    #Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / Smooth)
-    b1 = 2*a1*cosd(sqrt(2)*180 / Smooth)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
-    Zero_Mean_Filt = zeros(size(x,1))
-    Zero_Mean_Filt2 = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Zero_Mean_Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Zero_Mean_Filt[i-1] + c3*Zero_Mean_Filt[i-2]
-        Zero_Mean_Filt2[i] = (1 - α / 2)*(Zero_Mean_Filt[i] - Zero_Mean_Filt[i-1]) + (1 - α)*Zero_Mean_Filt2[i-1]
-    end
-    return Zero_Mean_Filt2
+    SuperSmoother(HP, Zero_Mean_Filt, Smooth)
+    highpass(Zero_Mean_Filt, Zero_Mean_Filt2, HPPeriod)
+    Zero_Mean_Filt2
 end
 
 @doc """
@@ -352,23 +326,15 @@ Roofing Filter As Indicator - Equation 7-3
 """
 function RoofingFilterIndicator(x::Array{Float64}; LPPeriod::Int=40,HPPeriod::Int=80)::Array{Float64}
     @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
+
     # Highpass filter cyclic components whose periods are shorter than 48 (n) bars
-    α = @compute_alpha 2π/√2 / HPPeriod
-    HP = zeros(size(x,1))
-    @inbounds for i = 3:length(x)
-    HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] + x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
-    #Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
+    HP = zeros(length(x))
+    highpass2(x, HP, HPPeriod)
+
+    # Smooth with a Super Smoother Filter from equation 3-3
     Roof_filt_Indicator = zeros(size(x,1))
-    @inbounds for i = 3:length(x)
-        Roof_filt_Indicator[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Roof_filt_Indicator[i-1] + c3*Roof_filt_Indicator[i-2]
-    end
-    return Roof_filt_Indicator
+    SuperSmoother(HP, Roof_filt_Indicator, LPPeriod)
+    Roof_filt_Indicator
 end
 
 @doc """
@@ -376,36 +342,36 @@ end
 
 Modified Stochastic - Equation 7-4
 """
-function ModifiedStochastic(x::Array{Float64}; n::Int=20, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
-    @check n<size(x,1) && n>0 "Argument n out of bounds."
-    #Highpass filter cyclic components whose periods are shorter than 48 bars
-    α = @compute_alpha 2π/√2 / HPPeriod
-    HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1]+ x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 -α)*HP[i-2]
-    end
+function ModifiedStochastic(in::AbstractArray{<:AbstractFloat},
+                            out::AbstractArray{<:AbstractFloat},
+                            n::Integer,
+                            HPPeriod::Integer,
+                            LPPeriod::Integer)
+    len = length(in)
+    @in_range n 0 len "Argument n out of bounds"
+
+    # Highpass filter cyclic components whose periods are shorter than 48 bars
+    HP = zeros(len)
+    highpass2(in, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
-    Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    Filt = zeros(len)
+    SuperSmoother(HP, Filt, LPPeriod)
+
     # Highest and lowest filt over n width
-    HighestC = zeros(size(x,1))
-    LowestC = zeros(size(x,1))
-    Stoc = zeros(size(x,1))
-    MyStochastic = zeros(size(x,1))
-    @inbounds for i = n:size(x,1)
-    HighestC[i] = maximum(Filt[i-n+1:i])
-    LowestC[i] = minimum(Filt[i-n+1:i])
-    Stoc[i] = (Filt[i] - LowestC[i]) / (HighestC[i] - LowestC[i])
-    MyStochastic[i] = c1*(Stoc[i] + Stoc[i-1]) / 2 + c2*MyStochastic[i-1] + c3*MyStochastic[i-2]
+    HighestC = zeros(len)
+    LowestC = zeros(len)
+    Stoc = zeros(len)
+    MyStochastic = zeros(len)
+
+    @inbounds for i = n:len
+        HighestC[i] = maximum(Filt[i-n+1:i])
+        LowestC[i] = minimum(Filt[i-n+1:i])
+        Stoc[i] = (Filt[i] - LowestC[i]) / (HighestC[i] - LowestC[i])
     end
-    return MyStochastic
+
+    SuperSmoother(Stoc, MyStochastic, LPPeriod)
+    MyStochastic
 end
 
 @doc """
@@ -415,27 +381,21 @@ Modified RSI - Equation 7-5
 """
 function ModifiedRSI(x::Array{Float64}; n::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check n<size(x,1) && n>0 "Argument n out of bounds."
+
     # Highpass filter cyclic components whose periods areshorter than 48 bars
-    α = @compute_alpha 2π/√2 / HPPeriod
     HP = zeros(size(x,1))
-    @inbounds for i =3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 -α)*HP[i-2]
-    end
+    highpass2(x, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPPeriod)
+
     ClosesUp = zeros(size(x,1))
     ClosesDn = zeros(size(x,1))
     filtdiff = zeros(size(x,1))
     posDiff= zeros(size(x,1))
     negDiff= zeros(size(x,1))
+
     # pos and neg diffs
     @inbounds for i = 2:size(x,1)
         # difference
@@ -444,26 +404,28 @@ function ModifiedRSI(x::Array{Float64}; n::Int=10, HPPeriod::Int=48, LPPeriod::I
             posDiff[i] = filtdiff[i]
         elseif filtdiff[i] < 0
             negDiff[i] = abs(filtdiff[i])
-            end
         end
-        # Running Sums of Filt
-        posSum = zeros(size(x,1))
-        negSum = zeros(size(x,1))
-        denom = zeros(size(x,1))
-        rsi = zeros(size(x,1))
-        @inbounds for i = n:size(x,1)
-            posSum[i] = sum(posDiff[i-n+1:i])
-            negSum[i] = sum(negDiff[i-n+1:i])
-            denom[i] = posSum[i]+negSum[i]
+    end
+
+    # Running Sums of Filt
+    posSum = zeros(size(x,1))
+    negSum = zeros(size(x,1))
+    denom = zeros(size(x,1))
+    rsi = zeros(size(x,1))
+    @inbounds for i = n:size(x,1)
+        posSum[i] = sum(posDiff[i-n+1:i])
+        negSum[i] = sum(negDiff[i-n+1:i])
+        denom[i] = posSum[i]+negSum[i]
+    end
+
+    # RSI
+    MyRSI = zeros(size(x,1))
+    @inbounds for i = 3:size(x,1)
+        if denom != 0 && denom[i-1] != 0
+            MyRSI[i] = c1*(posSum[i] /denom[i] + posSum[i-1] / denom[i-1]) / 2 + c2*MyRSI[i-1] +c3*MyRSI[i-2]
         end
-        # RSI
-        MyRSI = zeros(size(x,1))
-        @inbounds for i = 3:size(x,1)
-            if denom != 0 && denom[i-1] != 0
-                MyRSI[i] = c1*(posSum[i] /denom[i] + posSum[i-1] / denom[i-1]) / 2 + c2*MyRSI[i-1] +c3*MyRSI[i-2]
-            end
-        end
-        return MyRSI
+    end
+    MyRSI
 end
 
 @doc """
@@ -473,36 +435,29 @@ Autocorrelation Indicator - Equation 8-2
 """
 function AutoCorrelationIndicator(x::Array{Float64}; min_lag::Int=3, max_lag::Int=48, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument max_lag out of bounds."
+
     # Highpass filter cyclic components whose periods areshorter than 48 bars
-    α = @compute_alpha 2π/√2 / HPPeriod
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPPeriod)
+
     # Pearson correlation for each value of lag
     lags = min_lag:max_lag
     AutoCorrOut = zeros(size(x,1), max_lag)
     @inbounds for j = lags
-    # Lag series
+        # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-    # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = max_lag:size(x,1)
-        AutoCorrOut[i,j] = cor(lagged[i-j+1:i], Filt[i-j+1:i])
-        # Scale each correlation to range between 0 and 1
-        AutoCorrOut[i,j]= .5*(AutoCorrOut[i,j] + 1)
+        # Roll correlation width of lag and lagged version of itself
+        @inbounds for i = max_lag:size(x,1)
+            AutoCorrOut[i,j] = cor(lagged[i-j+1:i], Filt[i-j+1:i])
+            # Scale each correlation to range between 0 and 1
+            AutoCorrOut[i,j]= .5*(AutoCorrOut[i,j] + 1)
         end
     end
-    return AutoCorrOut
+    AutoCorrOut
 end
 
 @doc """
@@ -513,31 +468,22 @@ Single Lag Autocorrelation Indicator - Equation 8-2
 function SingleLagAutoCorrelationIndicator(x::Array{Float64}; lag::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check lag<size(x,1) && lag>0 "Argument n out of bounds."
     # Highpass filter cyclic components whose periods areshorter than 48 bars
-    α = @compute_alpha 2π/√2 / HPPeriod
-    HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPPeriod)
+
     # Pearson correlation for specified lag
     AutoCorrOut = zeros(size(x,1))
     # Lag series
-        lagged = [fill(0,lag); Filt[1:length(Filt)-lag]]
+    lagged = [fill(0,lag); Filt[1:length(Filt)-lag]]
     # Roll correlation width of lag and lagged version of itself
     @inbounds for i = lag:size(x,1)
         AutoCorrOut[i] = cor(lagged[i-lag+1:i], Filt[i-lag+1:i])
         #Scale each correlation to range between 0 and 1
         AutoCorrOut[i]= .5*(AutoCorrOut[i] + 1)
-        end
+    end
     return AutoCorrOut
 end
 
@@ -548,21 +494,13 @@ end
     """
 function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::Int=48,HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument max_lag out of bounds."
-    α = @compute_alpha 2π/√2 / HPPeriod
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPPeriod)
+
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
@@ -577,6 +515,7 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
             Avg_Corr_Out[i,j] = cor(lagged[i-avglength+1:i], Filt[i-avglength+1:i])
         end
     end
+
     # Calcualte sine and cosine part
     cosinePart = zeros(size(x,1), max_lag)
     sinePart = zeros(size(x,1), max_lag)
@@ -588,6 +527,7 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
             sqSum[:,j] .= cosinePart[:,j].^2 .+ sinePart[:,j].^2
         end
     end
+
     # Iterate over every i in j and smooth R by the .2 and .8 factors
     R = zeros(size(x,1), max_lag)
     @inbounds for j = min_lag:max_lag
@@ -660,32 +600,24 @@ Typical delay of the indicator will be about three bars when the AvgLength param
 function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::Int=48, LPPeriod::Int=10, HPPeriod::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
     # Highpass filter cyclic components whose periods are shorter than 48 bars
-    α = @compute_alpha 2π/√2 / HPPeriod
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPPeriod)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPPeriod)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPPeriod)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPPeriod)
+
     # Pearson correlation for each value of lag
     lags = min_lag:max_lag
     Avg_Corr_Rev_Out = zeros(size(x,1), max_lag)
     @inbounds for j = lags
-    # Lag series
+        # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-    # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = AvgLength:size(x,1)
-        Avg_Corr_Rev_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
-        # Scale each correlation to range between 0 and 1
-        Avg_Corr_Rev_Out[i,j] = .5*(Avg_Corr_Rev_Out[i,j] + 1)
+        # Roll correlation width of lag and lagged version of itself
+        @inbounds for i = AvgLength:size(x,1)
+            Avg_Corr_Rev_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
+            # Scale each correlation to range between 0 and 1
+            Avg_Corr_Rev_Out[i,j] = .5*(Avg_Corr_Rev_Out[i,j] + 1)
         end
     end
 
@@ -697,81 +629,74 @@ function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::In
                 SumDeltas[i,j] = 1.0
             else
                 SumDeltas[i,j] = 0.0
-                end
             end
         end
+    end
 
-        # Sum across the matrix of all correlation 0.5 crossings
-        Reversal = zeros(size(x,1))
-        test_sum = zeros(size(x,1))
-        @inbounds for i = 1:size(x,1)
-            test_sum[i] = sum(SumDeltas[i,:])
-            if sum(SumDeltas[i,:]) > 24
-                Reversal[i] = 1
-            else Reversal[i] =  0
-            end
+    # Sum across the matrix of all correlation 0.5 crossings
+    Reversal = zeros(size(x,1))
+    test_sum = zeros(size(x,1))
+    @inbounds for i = 1:size(x,1)
+        test_sum[i] = sum(SumDeltas[i,:])
+        if sum(SumDeltas[i,:]) > 24
+            Reversal[i] = 1
+        else Reversal[i] =  0
         end
-        return Reversal
+    end
+    Reversal
 end
 
-@doc """
-DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=10, HPLength::Int=48)::Array{Float64}
+"""
+    DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=10, HPLength::Int=48)::Array{Float64}
 
 Discrete Fourier Transform Sprectral Estimate - Equation 9-1
 """
 function DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=10, HPLength::Int=48)::Array{Float64}
-        @check HPLength<size(x,1) && HPLength>0 "Argument n out of bounds."
-# Highpass filter cyclic components whose periods are shorter than 48 bars
-    α = @compute_alpha 2π/√2 / HPLength
+    @check HPLength<size(x,1) && HPLength>0 "Argument n out of bounds."
+    # Highpass filter cyclic components whose periods are shorter than 48 bars
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPLength)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPLength)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPLength)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPLength)
 
     # Initialize matrix
     CosinePart = zeros(size(x,1), max_lag)
     SinePart = zeros(size(x,1), max_lag)
     Pwr = zeros(size(x,1), max_lag)
+
     # This is the DFT
     @inbounds for j = min_lag:max_lag
-    @inbounds for k = 1:max_lag
-        lagged_filt = [fill(0,k); Filt[1:length(Filt)-k]]
-        CosinePart[:,j] .= CosinePart[:,j] .+ lagged_filt .* cosd(360 * k / j) / j
-        SinePart[:,j] .= SinePart[:,j] .+ lagged_filt .* sind(360 * k / j) / j
-        Pwr[:,j] .= CosinePart[:,j] .* CosinePart[:,j] .+ SinePart[:,j] .* SinePart[:,j]
+        @inbounds for k = 1:max_lag
+            lagged_filt = [fill(0,k); Filt[1:length(Filt)-k]]
+            CosinePart[:,j] .= CosinePart[:,j] .+ lagged_filt .* cosd(360 * k / j) / j
+            SinePart[:,j] .= SinePart[:,j] .+ lagged_filt .* sind(360 * k / j) / j
+            Pwr[:,j] .= CosinePart[:,j] .* CosinePart[:,j] .+ SinePart[:,j] .* SinePart[:,j]
         end
     end
+
     # Find Maximum Power Level for Normalization
     # Note difers from TS output
     MaxPwr = zeros(size(x,1), max_lag)
     @inbounds for j = min_lag:max_lag
-    @inbounds for i = 2:size(x,1)
-    MaxPwr[i,j]  = .995*MaxPwr[i-1,j]
-        if Pwr[i,j]  > MaxPwr[i,j]
-         MaxPwr[i,j] = Pwr[i,j]
+        @inbounds for i = 2:size(x,1)
+            MaxPwr[i,j]  = .995*MaxPwr[i-1,j]
+            if Pwr[i,j]  > MaxPwr[i,j]
+                MaxPwr[i,j] = Pwr[i,j]
+            end
         end
     end
-    end
 
-#+_+_+_+_+_+_+_+_+_+_+_+_ unable to validate the below against TS
+    #+_+_+_+_+_+_+_+_+_+_+_+_ unable to validate the below against TS
     #Normalize Power Levels and Convert to Decibels
     @inbounds for j = min_lag:max_lag
         @inbounds for i = 1:size(x,1)
             if MaxPwr[i,j] != 0
                 Pwr[i,j] = Pwr[i,j] / MaxPwr[i,j]
-                end
             end
         end
+    end
 
     # Compute the dominant cycle using the CG of the spectrum
     Spx = zeros(size(x,1))
@@ -787,9 +712,9 @@ function DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=
             DominantCycle[i] = Spx[i] / Sp[i]
         else
             DominantCycle[i] = DominantCycle[i-1]  # if its zero carry forwrd previous value
-            end
         end
-        return DominantCycle
+    end
+    return DominantCycle
 end
 
 #="""
@@ -809,21 +734,13 @@ Adjust the RSI by a lookback period half the length of the dominant cycle
 function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument max_lag is out of bounds."
     #@check max_lag<size(x,1) && max_lag>0 "Argument n is out of bounds."
-    α = @compute_alpha 2π/√2 / HPLength
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPLength)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPLength)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPLength)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPLength)
+
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
@@ -965,21 +882,13 @@ Adjust the stochastic lookback period by the same value as the dominant cycle
 """
 function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
-    α = @compute_alpha 2π/√2 / HPLength
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPLength)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPLength)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPLength)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPLength)
+
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
@@ -1064,6 +973,7 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
         dominant_cycle[i] = max_lag
     end
     end
+
     # Stochastic Computation starts here
     # Highest and lowest filt over same period as dominant cycle
     HighestC = zeros(size(x,1))
@@ -1089,21 +999,14 @@ Adjust the lookback period by the same value as the dominant cycle
 """
 function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
-    α = @compute_alpha 2π/√2 / HPLength
+
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPLength)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPLength)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPLength)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPLength)
+
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
@@ -1225,21 +1128,14 @@ Tune filter to the measured dominant cycle
 """
 function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3, bandwidth::Float64=.3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
-    α = @compute_alpha 2π/√2 / HPLength
+
     HP = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        HP[i] = (1 - α / 2)*(1 - α / 2)*(x[i] - 2*x[i-1] +x[i-2]) + 2*(1 - α)*HP[i-1] - (1 - α)*(1 - α)*HP[i-2]
-    end
+    highpass2(x, HP, HPLength)
+
     # Smooth with a Super Smoother Filter from equation 3-3
-    a1 = exp(-sqrt(2)*π / LPLength)
-    b1 = 2*a1*cosd(sqrt(2)*180 / LPLength)
-    c2 = b1
-    c3 = -a1*a1
-    c1 = 1 - c2 - c3
     Filt = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        Filt[i] = c1*(HP[i] + HP[i-1]) / 2 + c2*Filt[i-1] + c3*Filt[i-2]
-    end
+    SuperSmoother(HP, Filt, LPLength)
+
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
@@ -1362,27 +1258,28 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     return signal
 end
 
-@doc """
+"""
     PFish(h::Array{Float64}, l::Array{Float64}; n::Int=10)::Array{Float64}
 
 - Fisher Transform - Equation 15-2 (Variation of)
 - Price Normalization
 - n = length of normalization period
 """
-function PFish(h::Array{Float64}, l::Array{Float64}; n::Int=10)::Array{Float64}
-    @check n<size(x,1) && n>0 "Argument n out of bounds."
-    # Fisher Transform Calculation
-    price_input = zeros(size(h,1))
-    price_input .= (h .+ l) ./ 2
-    MaxH = zeros(size(price_input,1))
-    MinL = zeros(size(price_input,1))
-    @inbounds for i =n:size(price_input,1)
-    MaxH[i] =  maximum(price_input[i-n+1:i])
-    MinL[i] = minimum(price_input[i-n+1:i])
+function PFish(price_input::AbstractVector{<:AbstractFloat}, n::Integer)
+    len = length(price_input)
+    @check n > 0 && n < len "Argument n out of bounds"
+    MaxH = zeros(len)
+    MinL = zeros(len)
+
+    @inbounds for i = n:len
+        MaxH[i] = maximum(price_input[i - n + 1:i])
+        MinL[i] = minimum(price_input[i - n + 1:i])
     end
-    Value1 = zeros(size(price_input,1))
-    Fish_out = zeros(size(price_input,1))
-    @inbounds for i = n:size(price_input,1)
+
+    Value1 = zeros(len)
+    Fish_out = zeros(len)
+
+    @inbounds for i = n:len
         Value1[i] = .33*2*((price_input[i] - MinL[i])/(MaxH[i] - MinL[i]) - .5) + .67*Value1[i-1]
         if Value1[i] > .99
             Value1[i] = .999
@@ -1396,5 +1293,5 @@ function PFish(h::Array{Float64}, l::Array{Float64}; n::Int=10)::Array{Float64}
         end
         Fish_out[i] = .5*log((1 + Value1[i])/(1 - Value1[i])) + .5*Fish_out[i-1]
     end
-        return Fish_out
+    Fish_out
 end
