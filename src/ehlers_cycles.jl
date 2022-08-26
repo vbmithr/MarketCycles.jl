@@ -31,8 +31,16 @@ macro check(check, msgs...)
     end
 end
 
-compute_alpha(x::AbstractFloat) = (cos(x) + sin(x - 1)) / cos(x)
+compute_alpha(x::AbstractFloat) = (cos(x) + sin(x) - 1) / cos(x)
 
+"""
+    highpass(in:AbstractArray{<:AbstractFloat}, out::AbstractArray{<:AbstractFloat}, period::Integer, α:Integer)
+
+1-pole highpass filter
+
+# Arguments
+- `period::Integer` Filter out components whose period is shorter than `period` bars.
+"""
 function highpass(in::AbstractArray{<:AbstractFloat},
                   out::AbstractArray{<:AbstractFloat},
                   period::Integer,
@@ -44,6 +52,14 @@ function highpass(in::AbstractArray{<:AbstractFloat},
     nothing
 end
 
+"""
+    highpass(in:AbstractArray{<:AbstractFloat}, out::AbstractArray{<:AbstractFloat}, period::Integer, α:Integer)
+
+2-pole highpass filter
+
+# Arguments
+- `period::Integer` Filter out components whose period is shorter than `period` bars.
+"""
 function highpass2(in::AbstractArray{<:AbstractFloat},
                    out::AbstractArray{<:AbstractFloat},
                    period::Integer,
@@ -86,6 +102,7 @@ function SuperSmoother(in::AbstractVector{<:AbstractFloat},
     c2 = b
     c3 = -a^2
     c1 = 1 - c2 - c3
+    out[0:1] = 0 # Clear first 2 indices of out
     @inbounds for i = 3:len
         out[i] = c1 * (in[i] + in[i-1]) / 2 + c2 * out[i-1] + c3 * out[i-2]
     end
@@ -280,19 +297,25 @@ end
 """
     HPLPRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
 
+Combo highpass order 1 + SuperSmoother
 HP LP Roofing Filter - Equation 7-1
 """
-function HPLPRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
-    @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
+function HPLPRoofingFilter(in::AbstractArray{<:AbstractFloat},
+                           out::AbstractArray{<:AbstractFloat},
+                           long::Integer,
+                           short::Integer)
+    len = length(in)
+    @check length(out) >= length(in) "out must be at least as long as in"
+    @in_range long 0 len "Argument long out of bounds"
+    @in_range short 0 long "Argument short out of bounds"
 
-    # Highpass filter cyclic components whose periods are shorter than 48 bars
-    HP = zeros(size(x,1))
-    highpass(x, HP, HPPeriod)
+    # Highpass filter cyclic components whose periods are shorter than long bars
+    HP = zeros(len)
+    highpass(in, HP, long)
 
     # Smooth with a Super Smoother Filter from equation 3-3
-    LP_HP_Filt = zeros(size(x,1))
-    SuperSmoother(HP, LP_HP_Filt, LPPeriod)
-    LP_HP_Filt
+    SuperSmoother(HP, out, short)
+    nothing
 end
 
 @doc """
@@ -319,25 +342,30 @@ function ZeroMeanRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, Smooth::Int=
     Zero_Mean_Filt2
 end
 
-@doc """
+"""
     RoofingFilterIndicator(x::Array{Float64}; LPPeriod::Int=40,HPPeriod::Int=80)::Array{Float64}
 
 Roofing Filter As Indicator - Equation 7-3
 """
-function RoofingFilterIndicator(x::Array{Float64}; LPPeriod::Int=40,HPPeriod::Int=80)::Array{Float64}
-    @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
+function RoofingFilterIndicator(in::AbstractArray{<:AbstractFloat},
+                                out::AbstractArray{<:AbstractFloat},
+                                long::Integer,
+                                short::Integer)
+    len = length(in)
+    @check length(out) >= length(in) "out must be at least as long as in"
+    @in_range long 5 80 "Argument long out of bounds"
+    @in_range short 5 long "Argument short out of bounds"
 
-    # Highpass filter cyclic components whose periods are shorter than 48 (n) bars
-    HP = zeros(length(x))
-    highpass2(x, HP, HPPeriod)
+    # Highpass filter cyclic components whose periods are shorter than long bars
+    HP = zeros(len)
+    highpass2(x, HP, long)
 
     # Smooth with a Super Smoother Filter from equation 3-3
-    Roof_filt_Indicator = zeros(size(x,1))
-    SuperSmoother(HP, Roof_filt_Indicator, LPPeriod)
-    Roof_filt_Indicator
+    SuperSmoother(HP, out, short)
+    nothing
 end
 
-@doc """
+"""
     ModifiedStochastic(x::Array{Float64}; n::Int=20, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
 
 Modified Stochastic - Equation 7-4
@@ -350,13 +378,9 @@ function ModifiedStochastic(in::AbstractArray{<:AbstractFloat},
     len = length(in)
     @in_range n 0 len "Argument n out of bounds"
 
-    # Highpass filter cyclic components whose periods are shorter than 48 bars
-    HP = zeros(len)
-    highpass2(in, HP, HPPeriod)
-
-    # Smooth with a Super Smoother Filter from equation 3-3
+    # Apply Roofing Filter Indicator
     Filt = zeros(len)
-    SuperSmoother(HP, Filt, LPPeriod)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Highest and lowest filt over n width
     HighestC = zeros(len)
@@ -382,13 +406,9 @@ Modified RSI - Equation 7-5
 function ModifiedRSI(x::Array{Float64}; n::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check n<size(x,1) && n>0 "Argument n out of bounds."
 
-    # Highpass filter cyclic components whose periods areshorter than 48 bars
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPPeriod)
-
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPPeriod)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     ClosesUp = zeros(size(x,1))
     ClosesDn = zeros(size(x,1))
@@ -433,23 +453,24 @@ end
 
 Autocorrelation Indicator - Equation 8-2
 """
-function AutoCorrelationIndicator(x::Array{Float64}; min_lag::Int=3, max_lag::Int=48, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
+function AutoCorrelationIndicator(in::AbstractArray{<:AbstractFloat},
+                                  out::AbstractArray{<:AbstractFloat},
+                                  min_lag::Integer,
+                                  max_lag::Integer,
+                                  HPPeriod::Integer,
+                                  LPPeriod::Integer)
     @check max_lag<size(x,1) && max_lag>0 "Argument max_lag out of bounds."
 
-    # Highpass filter cyclic components whose periods areshorter than 48 bars
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPPeriod)
-
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPPeriod)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Pearson correlation for each value of lag
-    lags = min_lag:max_lag
     AutoCorrOut = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    @inbounds for j = min_lag:max_lag
         # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
+
         # Roll correlation width of lag and lagged version of itself
         @inbounds for i = max_lag:size(x,1)
             AutoCorrOut[i,j] = cor(lagged[i-j+1:i], Filt[i-j+1:i])
@@ -467,12 +488,10 @@ Single Lag Autocorrelation Indicator - Equation 8-2
 """
 function SingleLagAutoCorrelationIndicator(x::Array{Float64}; lag::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check lag<size(x,1) && lag>0 "Argument n out of bounds."
-    # Highpass filter cyclic components whose periods areshorter than 48 bars
-    highpass2(x, HP, HPPeriod)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPPeriod)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Pearson correlation for specified lag
     AutoCorrOut = zeros(size(x,1))
@@ -494,12 +513,10 @@ end
     """
 function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::Int=48,HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument max_lag out of bounds."
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPPeriod)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPPeriod)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Pearson correlation for each value of lag
     # Initialize correlation sums
@@ -599,13 +616,10 @@ Typical delay of the indicator will be about three bars when the AvgLength param
 """
 function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::Int=48, LPPeriod::Int=10, HPPeriod::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
-    # Highpass filter cyclic components whose periods are shorter than 48 bars
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPPeriod)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPPeriod)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Pearson correlation for each value of lag
     lags = min_lag:max_lag
@@ -653,13 +667,10 @@ Discrete Fourier Transform Sprectral Estimate - Equation 9-1
 """
 function DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=10, HPLength::Int=48)::Array{Float64}
     @check HPLength<size(x,1) && HPLength>0 "Argument n out of bounds."
-    # Highpass filter cyclic components whose periods are shorter than 48 bars
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPLength)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPLength)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Initialize matrix
     CosinePart = zeros(size(x,1), max_lag)
@@ -734,12 +745,10 @@ Adjust the RSI by a lookback period half the length of the dominant cycle
 function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument max_lag is out of bounds."
     #@check max_lag<size(x,1) && max_lag>0 "Argument n is out of bounds."
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPLength)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPLength)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPLength, LPLength)
 
     # Pearson correlation for each value of lag
     # Initialize correlation sums
@@ -882,12 +891,10 @@ Adjust the stochastic lookback period by the same value as the dominant cycle
 """
 function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPLength)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPLength)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPLength, LPLength)
 
     # Pearson correlation for each value of lag
     # Initialize correlation sums
@@ -1000,12 +1007,9 @@ Adjust the lookback period by the same value as the dominant cycle
 function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
 
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPLength)
-
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPLength)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPLength, LPLength)
 
     # Pearson correlation for each value of lag
     # Initialize correlation sums
@@ -1129,12 +1133,9 @@ Tune filter to the measured dominant cycle
 function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength::Int=10, HPLength::Int=48, AvgLength::Int=3, bandwidth::Float64=.3)::Array{Float64}
     @check max_lag<size(x,1) && max_lag>0 "Argument n out of bounds."
 
-    HP = zeros(size(x,1))
-    highpass2(x, HP, HPLength)
-
-    # Smooth with a Super Smoother Filter from equation 3-3
-    Filt = zeros(size(x,1))
-    SuperSmoother(HP, Filt, LPLength)
+    # Apply Roofing Filter Indicator
+    Filt = zeros(len)
+    RoofingFilterIndicator(in, Filt, HPLength, LPLength)
 
     # Pearson correlation for each value of lag
     # Initialize correlation sums
