@@ -6,7 +6,7 @@
 # 9-1 onwards
 ##############################
 
-using Statistics
+using Statistics, DataStructures
 
 macro in_range(x, a, b, msgs...)
     msg_body = isempty(msgs) ? x : msgs[1]
@@ -34,48 +34,50 @@ end
 compute_alpha(x::AbstractFloat) = (cos(x) + sin(x) - 1) / cos(x)
 
 """
-    highpass(in:AbstractArray{<:AbstractFloat}, out::AbstractArray{<:AbstractFloat}, period::Integer, α:Integer)
+    highpass(in:AbstractVector{<:AbstractFloat}, out::AbstractVector{<:AbstractFloat}, period::Integer, α:Integer)
 
 1-pole highpass filter
 
 # Arguments
 - `period::Integer` Filter out components whose period is shorter than `period` bars.
 """
-function highpass(in::AbstractArray{<:AbstractFloat},
-                  out::AbstractArray{<:AbstractFloat},
+function highpass(in::AbstractVector{<:AbstractFloat},
+                  out::AbstractVector{<:AbstractFloat},
                   period::Integer,
                   α::Integer=compute_alpha(2π / period))
-    @check len(out) >= len(in)
-    @inbounds for i = 3:length(in)
+    len = length(in)
+    @check length(out) >= len
+    for i = 3:len
         out[i] = (1 - α / 2) * (in[i] - in[i-1]) + (1 - α) * out[i-1]
     end
     nothing
 end
 
 """
-    highpass(in:AbstractArray{<:AbstractFloat}, out::AbstractArray{<:AbstractFloat}, period::Integer, α:Integer)
+    highpass(in:AbstractVector{<:AbstractFloat}, out::AbstractVector{<:AbstractFloat}, period::Integer, α:Integer)
 
 2-pole highpass filter
 
 # Arguments
 - `period::Integer` Filter out components whose period is shorter than `period` bars.
 """
-function highpass2(in::AbstractArray{<:AbstractFloat},
-                   out::AbstractArray{<:AbstractFloat},
+function highpass2(in::AbstractVector{<:AbstractFloat},
+                   out::AbstractVector{<:AbstractFloat},
                    period::Integer,
-                   α::Integer=compute_alpha(2π/√2 / period))
-    @check len(out) >= len(in)
-    @inbounds for i = 3:length(in)
+                   α::AbstractFloat=compute_alpha(2π/√2 / period))
+    len = length(in)
+    @check length(out) >= length(in)
+    for i = 3:len
         out[i] =
             (1 - α / 2)^2 * (in[i] - 2in[i-1] + in[i-2])
-        + 2(1 - α) * out[i-1]
-        - (1 - α)^2 * out[i-2]
+         + 2(1 - α)       * out[i-1]
+         -  (1 - α)^2     * out[i-2]
     end
     nothing
 end
 
 """
-    SuperSmoother(in::AbstractArray{Float64}, out::AbstractArray{Float64}, period::Integer)
+    SuperSmoother(in::AbstractVector{Float64}, out::AbstractVector{Float64}, period::Integer)
 
 Super Smoother - Equation 3-3.
 
@@ -102,8 +104,8 @@ function SuperSmoother(in::AbstractVector{<:AbstractFloat},
     c2 = b
     c3 = -a^2
     c1 = 1 - c2 - c3
-    out[0:1] = 0 # Clear first 2 indices of out
-    @inbounds for i = 3:len
+    out[1:2] .= 0 # Clear first 2 indices of out
+    for i = 3:len
         out[i] = c1 * (in[i] + in[i-1]) / 2 + c2 * out[i-1] + c3 * out[i-2]
     end
     nothing
@@ -117,16 +119,17 @@ Decycler - Equation 4-1
 # Arguments
 - `cutoff::Integer`: high-pass filter cyclic components whose periods are shorter than `cutoff` bars
 """
-function Decycler(in::AbstractArray{<:AbstractFloat},
-                  out::AbstractArray{<:AbstractFloat},
+function Decycler(in::AbstractVector{<:AbstractFloat},
+                  out::AbstractVector{<:AbstractFloat},
                   cutoff::Integer)
-    @check length(out) >= length(in) "Output length smaller than input length"
-    @in_range cutoff 10 length(in) "Decycler must have a cutoff period greater than 10"
+    len = rength(in)
+    @check length(out) >= len "Output length smaller than input length"
+    @in_range cutoff 10 len "Decycler must have a cutoff period greater than 10"
 
     # Compute α: why is it computed like this??
     α = compute_alpha(2π / cutoff)
 
-    @inbounds for i in 2:length(in)
+    for i in 2:len
         out[i] = (α / 2) * (in[i] + in[i-1]) + (1 - α) * in[i-1]
     end
     nothing
@@ -148,8 +151,8 @@ experimentation.
 - `short::Integer`: cutoff period of the short high-pass filter
 - `long::Integer`: cutoff period of the long high-pass filter
 """
-function DecyclerOSC(in::AbstractArray{<:AbstractFloat},
-                     out::AbstractArray{<:AbstractFloat},
+function DecyclerOSC(in::AbstractVector{<:AbstractFloat},
+                     out::AbstractVector{<:AbstractFloat},
                      short::Integer,
                      long::Integer)
     @in_range short 10 length(in) "Invalid short cutoff"
@@ -171,8 +174,8 @@ end
 
 Band Pass Filter - Equation 5-1
 """
-function BandPassFilter(in::AbstractArray{<:AbstractFloat};
-                        out::AbstractArray{<:AbstractFloat},
+function BandPassFilter(in::AbstractVector{<:AbstractFloat};
+                        out::AbstractVector{<:AbstractFloat},
                         period::Integer,
                         δ::AbstractFloat)
     @in_range δ 0 1 "δ must be a proportion of period"
@@ -189,17 +192,17 @@ function BandPassFilter(in::AbstractArray{<:AbstractFloat};
 
     # Compute highpass
     α2 = compute_alpha(δ*π/2 / period)
-    compute_highpass(in, HP, period, α2)
+    highpass(in, HP, period, α2)
 
     # Compute bandpass
-    @inbounds for i in 3:length(x)
+    for i in 3:length(x)
         BP[i] = .5 * (1 - σ) * (HP[i] - HP[i-2]) + λ * (1 + σ) * BP[i-1] - σ * BP[i-2] # Bandpass
     end
 
     # Signal
     Signal = zeros(size(x,1))
     Peak = zeros(size(x,1))
-    @inbounds for i in 2:length(BP)
+    for i in 2:length(BP)
         Peak[i] = .991 * Peak[i-1]
         if abs(BP[i]) > Peak[i]
             Peak[i] = abs(BP[i])
@@ -212,7 +215,7 @@ function BandPassFilter(in::AbstractArray{<:AbstractFloat};
     end
 
     # Replace Nan to 0
-    @inbounds for i in 1:length(Signal)
+    for i in 1:length(Signal)
         if isnan(Signal[i]) == 1
             Signal[i] = 0.0
         else
@@ -222,7 +225,7 @@ function BandPassFilter(in::AbstractArray{<:AbstractFloat};
 
     # Trigger
     α2 = compute_alpha(3π * δ / period)
-    @inbounds for i = 2:length(x)
+    for i = 2:length(x)
         BP_Trigger[i] = (1 + α2 / 2) * (Signal[i] - Signal[i-1]) + (1 - α2) * BP_Trigger[i-1]
     end
     nothing
@@ -240,8 +243,8 @@ Zero Crossings of the Band-Pass Filter - Equation 5-2
 
 Hurst Coefficient - Equation 6-1
 """
-function HurstCoefficient(in::AbstractArray{<:AbstractFloat},
-                          out::AbstractArray{<:AbstractFloat},
+function HurstCoefficient(in::AbstractVector{<:AbstractFloat},
+                          out::AbstractVector{<:AbstractFloat},
                           n::Integer)
     len = length(in)
     @check n<len && n>0 "Argument n out of bounds."
@@ -253,7 +256,7 @@ function HurstCoefficient(in::AbstractArray{<:AbstractFloat},
     HH = zeros(len)
     LL = zeros(len)
     N3 = zeros(len)
-    @inbounds for i = n:len
+    for i = n:len
         HH[i] = maximum(x[i-n+1:i])
         LL[i] = minimum(x[i-n+1:i])
         N3[i] = (HH[i] - LL[i]) / n
@@ -263,7 +266,7 @@ function HurstCoefficient(in::AbstractArray{<:AbstractFloat},
     HH = zeros(len)
     LL = zeros(len)
     N1 = zeros(len)
-    @inbounds for i = half_n:len
+    for i = half_n:len
         HH[i] = maximum(x[i-half_n+1:i])
         LL[i] = minimum(x[i-half_n+1:i])
         N1[i] = (HH[i] - LL[i]) / half_n
@@ -275,7 +278,7 @@ function HurstCoefficient(in::AbstractArray{<:AbstractFloat},
     HH_out = zeros(len)
     LL_out = zeros(len)
     N2 = zeros(len)
-    @inbounds for i = half_n:len
+    for i = half_n:len
         HH_out[i] = maximum(HH[i-half_n+1:i])
         LL_out[i] = minimum(LL[i-half_n+1:i])
         N2[i] = (HH_out[i] - LL_out[i])/(half_n)
@@ -284,7 +287,7 @@ function HurstCoefficient(in::AbstractArray{<:AbstractFloat},
     # Hurst
     Dimen = zeros(len)
     Hurst = zeros(len)
-    @inbounds for i = 3:len
+    for i = 3:len
         if N1[i] > 0 && N2[i] > 0 && N3[i] > 0
             Dimen[i] = .5*((log(N1[i]+ N2[i]) - log(N3[i])) / log(2) + Dimen[i-1])
             Hurst[i] = 2 - Dimen[i]
@@ -300,8 +303,8 @@ end
 Combo highpass order 1 + SuperSmoother
 HP LP Roofing Filter - Equation 7-1
 """
-function HPLPRoofingFilter(in::AbstractArray{<:AbstractFloat},
-                           out::AbstractArray{<:AbstractFloat},
+function HPLPRoofingFilter(in::AbstractVector{<:AbstractFloat},
+                           out::AbstractVector{<:AbstractFloat},
                            long::Integer,
                            short::Integer)
     len = length(in)
@@ -326,20 +329,25 @@ K0 = Lag 0
 # Lag 0 Is Most Responsive
 # Ehlers describes using Lag 0 and Lag 1 cross overs/unders as a signal trigger for buying / selling
 """
-function ZeroMeanRoofingFilter(x::Array{Float64}; HPPeriod::Int=48, Smooth::Int=10)::Array{Float64}
-    @check HPPeriod<size(x,1) && HPPeriod>0 "Argument HPPeriod out of bounds."
+function ZeroMeanRoofingFilter(in::AbstractVector{<:AbstractFloat},
+                               out::AbstractVector{<:AbstractFloat},
+                               long::Integer,
+                               short::Integer)
+    len = length(in)
+    @in_range long 10 len
+    @in_range short 5 long
 
-    # Highpass filter cyclic components whose periods are shorter than 48 bars
-    HP = zeros(size(x,1))
-    highpass(x, HP, HPPeriod)
+    # Highpass filter cyclic components whose periods are shorter than long bars
+    HP = zeros(len)
+    highpass(in, HP, long)
 
     # Smooth with a Super Smoother Filter from equation 3-3
-    Zero_Mean_Filt = zeros(size(x,1))
-    Zero_Mean_Filt2 = zeros(size(x,1))
+    smooth = zeros(len)
+    SuperSmoother(HP, smooth, short)
 
-    SuperSmoother(HP, Zero_Mean_Filt, Smooth)
-    highpass(Zero_Mean_Filt, Zero_Mean_Filt2, HPPeriod)
-    Zero_Mean_Filt2
+    # Highpass the result with initial long period
+    highpass(smooth, out, long)
+    nothing
 end
 
 """
@@ -347,105 +355,121 @@ end
 
 Roofing Filter As Indicator - Equation 7-3
 """
-function RoofingFilterIndicator(in::AbstractArray{<:AbstractFloat},
-                                out::AbstractArray{<:AbstractFloat},
+function RoofingFilterIndicator(in::AbstractVector{<:AbstractFloat},
+                                out::AbstractVector{<:AbstractFloat},
                                 long::Integer,
                                 short::Integer)
     len = length(in)
-    @check length(out) >= length(in) "out must be at least as long as in"
+    @check length(out) >= len "out must be at least as long as in"
     @in_range long 5 80 "Argument long out of bounds"
     @in_range short 5 long "Argument short out of bounds"
 
     # Highpass filter cyclic components whose periods are shorter than long bars
-    HP = zeros(len)
-    highpass2(x, HP, long)
+    filtered = zeros(len)
+    highpass2(in, filtered, long)
 
-    # Smooth with a Super Smoother Filter from equation 3-3
-    SuperSmoother(HP, out, short)
+    # smooth with a super smoother filter from equation 3-3
+    SuperSmoother(filtered, out, short)
     nothing
 end
 
-"""
-    ModifiedStochastic(x::Array{Float64}; n::Int=20, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
-
-Modified Stochastic - Equation 7-4
-"""
-function ModifiedStochastic(in::AbstractArray{<:AbstractFloat},
-                            out::AbstractArray{<:AbstractFloat},
-                            n::Integer,
-                            HPPeriod::Integer,
-                            LPPeriod::Integer)
-    len = length(in)
-    @in_range n 0 len "Argument n out of bounds"
-
-    # Apply Roofing Filter Indicator
-    Filt = zeros(len)
-    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
-
-    # Highest and lowest filt over n width
-    HighestC = zeros(len)
-    LowestC = zeros(len)
-    Stoc = zeros(len)
-    MyStochastic = zeros(len)
-
-    @inbounds for i = n:len
-        HighestC[i] = maximum(Filt[i-n+1:i])
-        LowestC[i] = minimum(Filt[i-n+1:i])
-        Stoc[i] = (Filt[i] - LowestC[i]) / (HighestC[i] - LowestC[i])
+function minimum(cb::CircularBuffer{<:AbstractFloat})
+    min = typemax(eltype(cb))
+    for i in eachindex(cb)
+        if cb[i] < min
+            min = cb[i]
+        end
     end
-
-    SuperSmoother(Stoc, MyStochastic, LPPeriod)
-    MyStochastic
+    min
 end
 
-@doc """
+function maximum(cb::CircularBuffer{<:AbstractFloat})
+    max = typemin(eltype(cb))
+    for i in eachindex(cb)
+        if cb[i] > max
+            max = cb[i]
+        end
+    end
+    max
+end
+
+"""
+    modifiedstochastic(x::array{float64}; n::int=20, hpperiod::int=48, lpperiod::int=10)::array{float64}
+
+modified stochastic - equation 7-4
+"""
+function ModifiedStochastic(in::AbstractVector{<:AbstractFloat},
+                            out::AbstractVector{<:AbstractFloat},
+                            n::Integer,
+                            long::Integer,
+                            short::Integer)
+    len = length(in)
+    @in_range n 0 len "argument n out of bounds"
+
+    # apply roofing filter indicator
+    filtered = zeros(len)
+    RoofingFilterIndicator(in, filtered, long, short)
+
+    cb = CircularBuffer{eltype(in)}(n)
+    for i = 1:n-1
+        push!(cb, filtered[i])
+    end
+
+    stoc = zeros(len)
+    for i = n:len
+        push!(cb, in[i])
+        l = minimum(cb)
+        h = maximum(cb)
+        stoc[i] = (in[i] - l) / (h - l)
+    end
+
+    SuperSmoother(stoc, out, short)
+    nothing
+end
+
+function sums(cb::CircularBuffer{<:AbstractFloat})
+    sum_pos = 0
+    sum_neg = 0
+    for x in cb
+        x > 0 ? sum_pos += x : sum_neg += -x
+    end
+    (sum_pos, sum_neg)
+end
+
+"""
     ModifiedRSI(x::Array{Float64}; n::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
 
 Modified RSI - Equation 7-5
 """
-function ModifiedRSI(x::Array{Float64}; n::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
-    @check n<size(x,1) && n>0 "Argument n out of bounds."
+function ModifiedRSI(in::AbstractVector{<:AbstractFloat},
+                     out::AbstractVector{<:AbstractFloat},
+                     n::Integer,
+                     long::Integer,
+                     short::Integer)
+    len = length(in)
+    @check length(out) >= len
+    @in_range n 0 len
+    @in_range short 5 len
+    @in_range long short len
 
     # Apply Roofing Filter Indicator
-    Filt = zeros(len)
-    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
+    filtered = zeros(len)
+    RoofingFilterIndicator(in, filtered, long, short)
 
-    ClosesUp = zeros(size(x,1))
-    ClosesDn = zeros(size(x,1))
-    filtdiff = zeros(size(x,1))
-    posDiff= zeros(size(x,1))
-    negDiff= zeros(size(x,1))
-
-    # pos and neg diffs
-    @inbounds for i = 2:size(x,1)
-        # difference
-        filtdiff[i] = Filt[i] - Filt[i-1]
-        if filtdiff[i] > 0
-            posDiff[i] = filtdiff[i]
-        elseif filtdiff[i] < 0
-            negDiff[i] = abs(filtdiff[i])
-        end
-    end
-
-    # Running Sums of Filt
-    posSum = zeros(size(x,1))
-    negSum = zeros(size(x,1))
-    denom = zeros(size(x,1))
-    rsi = zeros(size(x,1))
-    @inbounds for i = n:size(x,1)
-        posSum[i] = sum(posDiff[i-n+1:i])
-        negSum[i] = sum(negDiff[i-n+1:i])
-        denom[i] = posSum[i]+negSum[i]
+    cb = CircularBuffer{eltype(in)}(n-1)
+    for i = 2:n-1
+        push!(cb, filtered[i] - filtered[i-1])
     end
 
     # RSI
-    MyRSI = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
-        if denom != 0 && denom[i-1] != 0
-            MyRSI[i] = c1*(posSum[i] /denom[i] + posSum[i-1] / denom[i-1]) / 2 + c2*MyRSI[i-1] +c3*MyRSI[i-2]
-        end
+    MyRSI = zeros(len)
+    for i = n:len
+        push!(cb, filtered[i] - filtered[i-1])
+        cu, cd = sums(cb)
+        MyRSI[i] = cu+cd != 0 ? cu / (cu + cd) : 0
     end
-    MyRSI
+    SuperSmoother(MyRSI, out, short)
+    nothing
 end
 
 @doc """
@@ -453,8 +477,8 @@ end
 
 Autocorrelation Indicator - Equation 8-2
 """
-function AutoCorrelationIndicator(in::AbstractArray{<:AbstractFloat},
-                                  out::AbstractArray{<:AbstractFloat},
+function AutoCorrelationIndicator(in::AbstractVector{<:AbstractFloat},
+                                  out::AbstractVector{<:AbstractFloat},
                                   min_lag::Integer,
                                   max_lag::Integer,
                                   HPPeriod::Integer,
@@ -467,12 +491,12 @@ function AutoCorrelationIndicator(in::AbstractArray{<:AbstractFloat},
 
     # Pearson correlation for each value of lag
     AutoCorrOut = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
+    for j = min_lag:max_lag
         # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
 
         # Roll correlation width of lag and lagged version of itself
-        @inbounds for i = max_lag:size(x,1)
+        for i = max_lag:size(x,1)
             AutoCorrOut[i,j] = cor(lagged[i-j+1:i], Filt[i-j+1:i])
             # Scale each correlation to range between 0 and 1
             AutoCorrOut[i,j]= .5*(AutoCorrOut[i,j] + 1)
@@ -498,7 +522,7 @@ function SingleLagAutoCorrelationIndicator(x::Array{Float64}; lag::Int=10, HPPer
     # Lag series
     lagged = [fill(0,lag); Filt[1:length(Filt)-lag]]
     # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = lag:size(x,1)
+    for i = lag:size(x,1)
         AutoCorrOut[i] = cor(lagged[i-lag+1:i], Filt[i-lag+1:i])
         #Scale each correlation to range between 0 and 1
         AutoCorrOut[i]= .5*(AutoCorrOut[i] + 1)
@@ -524,11 +548,11 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
     avglength = 3
     temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    for j = lags
         # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
         # Roll correlation width of lag and lagged version of itself
-        @inbounds for i = max_lag:size(x,1)
+        for i = max_lag:size(x,1)
             Avg_Corr_Out[i,j] = cor(lagged[i-avglength+1:i], Filt[i-avglength+1:i])
         end
     end
@@ -537,7 +561,7 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
     cosinePart = zeros(size(x,1), max_lag)
     sinePart = zeros(size(x,1), max_lag)
     sqSum = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
+    for j = min_lag:max_lag
         for k = 3:48
             cosinePart[:,j] .= cosinePart[:,j] .+ Avg_Corr_Out[:,k] .* cosd(370 * k / j)
             sinePart[:,j] .= sinePart[:,j] .+ Avg_Corr_Out[:,k] .* sind(370 * k / j)
@@ -547,8 +571,8 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
 
     # Iterate over every i in j and smooth R by the .2 and .8 factors
     R = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             R[i,j] = (.2*sqSum[i,j]) * (sqSum[i,j]) + (.8 *R[i-1,j])
         end
     end
@@ -559,8 +583,8 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
     # need to validate this and below!
     MaxPwr = zeros(size(x,1), max_lag)
     #MaxPwr = 0
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             MaxPwr[i,j] = .995*MaxPwr[i-1,j]
             if R[i,j] > MaxPwr[i,j]
                 MaxPwr[i,j]= R[i,j]
@@ -569,15 +593,15 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
     end
 
     Pwr = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = min_lag:max_lag
+        for i = 1:size(x,1)
             Pwr[i,j] = R[i,j] / MaxPwr[i,j]
         end
     end
 
     # Replace Nan to 0
-    @inbounds for j = 1:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = 1:max_lag
+        for i = 1:size(x,1)
             if isnan(Pwr[i,j]) == 1
                 Pwr[i,j] = 0.0
             else
@@ -624,11 +648,11 @@ function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::In
     # Pearson correlation for each value of lag
     lags = min_lag:max_lag
     Avg_Corr_Rev_Out = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    for j = lags
         # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
         # Roll correlation width of lag and lagged version of itself
-        @inbounds for i = AvgLength:size(x,1)
+        for i = AvgLength:size(x,1)
             Avg_Corr_Rev_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
             # Scale each correlation to range between 0 and 1
             Avg_Corr_Rev_Out[i,j] = .5*(Avg_Corr_Rev_Out[i,j] + 1)
@@ -637,8 +661,8 @@ function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::In
 
     # mark all > .5 and <.5 crossings
     SumDeltas = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
-        @inbounds for i = AvgLength:size(x,1)
+    for j = lags
+        for i = AvgLength:size(x,1)
             if (Avg_Corr_Rev_Out[i,j] > 0.5) && (Avg_Corr_Rev_Out[i-1,j] < 0.5) || (Avg_Corr_Rev_Out[i,j] < 0.5) && (Avg_Corr_Rev_Out[i-1,j] > 0.5)
                 SumDeltas[i,j] = 1.0
             else
@@ -650,7 +674,7 @@ function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::In
     # Sum across the matrix of all correlation 0.5 crossings
     Reversal = zeros(size(x,1))
     test_sum = zeros(size(x,1))
-    @inbounds for i = 1:size(x,1)
+    for i = 1:size(x,1)
         test_sum[i] = sum(SumDeltas[i,:])
         if sum(SumDeltas[i,:]) > 24
             Reversal[i] = 1
@@ -678,8 +702,8 @@ function DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=
     Pwr = zeros(size(x,1), max_lag)
 
     # This is the DFT
-    @inbounds for j = min_lag:max_lag
-        @inbounds for k = 1:max_lag
+    for j = min_lag:max_lag
+        for k = 1:max_lag
             lagged_filt = [fill(0,k); Filt[1:length(Filt)-k]]
             CosinePart[:,j] .= CosinePart[:,j] .+ lagged_filt .* cosd(360 * k / j) / j
             SinePart[:,j] .= SinePart[:,j] .+ lagged_filt .* sind(360 * k / j) / j
@@ -690,8 +714,8 @@ function DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=
     # Find Maximum Power Level for Normalization
     # Note difers from TS output
     MaxPwr = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             MaxPwr[i,j]  = .995*MaxPwr[i-1,j]
             if Pwr[i,j]  > MaxPwr[i,j]
                 MaxPwr[i,j] = Pwr[i,j]
@@ -701,8 +725,8 @@ function DFTS(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, LPLength::Int=
 
     #+_+_+_+_+_+_+_+_+_+_+_+_ unable to validate the below against TS
     #Normalize Power Levels and Convert to Decibels
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = min_lag:max_lag
+        for i = 1:size(x,1)
             if MaxPwr[i,j] != 0
                 Pwr[i,j] = Pwr[i,j] / MaxPwr[i,j]
             end
@@ -755,11 +779,11 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     lags = min_lag:max_lag
     temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    for j = lags
     # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
         # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = max_lag:size(x,1)
+    for i = max_lag:size(x,1)
         Avg_Corr_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
         end
     end
@@ -768,8 +792,8 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     cosinePart = zeros(size(x,1), max_lag)
     sinePart = zeros(size(x,1), max_lag)
     sqSum = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for k = 3:max_lag
+    for j = min_lag:max_lag
+        for k = 3:max_lag
             cosinePart[:,j] .= cosinePart[:,j] .+ Avg_Corr_Out[:,k] .* cosd(370 * k / j)
             sinePart[:,j] .= sinePart[:,j] .+ Avg_Corr_Out[:,k] .* sind(370 * k / j)
             sqSum[:,j] .= cosinePart[:,j].^2 .+ sinePart[:,j].^2
@@ -778,8 +802,8 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
 
     # Iterate over every i in j and smooth R by the .2 and .8 factors
     R = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             R[i,j] = (.2*sqSum[i,j]) * (sqSum[i,j]) + (.8 *R[i-1,j])
         end
     end
@@ -788,8 +812,8 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     # need to validate this and below!
     MaxPwr = zeros(size(x,1), max_lag)
     #MaxPwr = 0
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             MaxPwr[i,j] = .995*MaxPwr[i-1,j]
         if R[i,j] > MaxPwr[i,j]
             MaxPwr[i,j]= R[i,j]
@@ -797,15 +821,15 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
         end
     end
     Pwr = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = min_lag:max_lag
+        for i = 1:size(x,1)
             Pwr[i,j] = R[i,j] / MaxPwr[i,j]
         end
     end
 
     # Replace Nan to 0
-    @inbounds for j = 1:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = 1:max_lag
+        for i = 1:size(x,1)
     if isnan(Pwr[i,j]) == 1
         Pwr[i,j] = 0.0
     else
@@ -836,13 +860,11 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     end
 
     # Adaptive RSI starts here, using half the measured dominant
-    ClosesUp = zeros(size(x,1))
-    ClosesDn = zeros(size(x,1))
     filtdiff = zeros(size(x,1))
     posDiff= zeros(size(x,1))
     negDiff= zeros(size(x,1))
     # pos and neg diffs
-    @inbounds for i = 2:size(x,1)
+    for i = 2:size(x,1)
         # difference
         filtdiff[i] = Filt[i] - Filt[i-1]
         if filtdiff[i] > 0
@@ -866,7 +888,7 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
             n[i] == n[i]
         end
     end
-        @inbounds for i = n[1]:size(x,1)
+        for i = n[1]:size(x,1)
             k = n[i]
             posSum[i] = sum(posDiff[i-k+1:i])
             negSum[i] = sum(negDiff[i-k+1:i])
@@ -875,7 +897,7 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
 
     # RSI
     MyRSI = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
+    for i = 3:size(x,1)
     if denom != 0 && denom[i-1] != 0
         MyRSI[i] = c1*(posSum[i] /denom[i] + posSum[i-1] / denom[i-1]) / 2 + c2*MyRSI[i-1] +c3*MyRSI[i-2]
         end
@@ -901,11 +923,11 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
     lags = min_lag:max_lag
     temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    for j = lags
     # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
         # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = max_lag:size(x,1)
+    for i = max_lag:size(x,1)
         Avg_Corr_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
         end
     end
@@ -914,8 +936,8 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
     cosinePart = zeros(size(x,1), max_lag)
     sinePart = zeros(size(x,1), max_lag)
     sqSum = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for k = 3:max_lag
+    for j = min_lag:max_lag
+        for k = 3:max_lag
             cosinePart[:,j] .= cosinePart[:,j] .+ Avg_Corr_Out[:,k] .* cosd(370 * k / j)
             sinePart[:,j] .= sinePart[:,j] .+ Avg_Corr_Out[:,k] .* sind(370 * k / j)
             sqSum[:,j] .= cosinePart[:,j].^2 .+ sinePart[:,j].^2
@@ -924,8 +946,8 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
 
     # Iterate over every i in j and smooth R by the .2 and .8 factors
     R = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             R[i,j] = (.2*sqSum[i,j]) * (sqSum[i,j]) + (.8 *R[i-1,j])
         end
     end
@@ -934,8 +956,8 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
     # need to validate this and below!
     MaxPwr = zeros(size(x,1), max_lag)
     #MaxPwr = 0
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             MaxPwr[i,j] = .995*MaxPwr[i-1,j]
         if R[i,j] > MaxPwr[i,j]
             MaxPwr[i,j]= R[i,j]
@@ -943,15 +965,15 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
         end
     end
     Pwr = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = min_lag:max_lag
+        for i = 1:size(x,1)
             Pwr[i,j] = R[i,j] / MaxPwr[i,j]
         end
     end
 
     # Replace Nan to 0
-    @inbounds for j = 1:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = 1:max_lag
+        for i = 1:size(x,1)
     if isnan(Pwr[i,j]) == 1
         Pwr[i,j] = 0.0
     else
@@ -988,7 +1010,7 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
     Stoc = zeros(size(x,1))
     adaptive_stochastic = zeros(size(x,1))
     n = Int.(round.(dominant_cycle; digits=0))
-    @inbounds for i = n[1]:size(x,1)
+    for i = n[1]:size(x,1)
         k = n[i]
         HighestC[i] = maximum(Filt[i-k+1:i])
         LowestC[i] = minimum(Filt[i-k+1:i])
@@ -1016,11 +1038,11 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     lags = min_lag:max_lag
     temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    for j = lags
     # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
         # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = max_lag:size(x,1)
+    for i = max_lag:size(x,1)
         Avg_Corr_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
         end
     end
@@ -1029,8 +1051,8 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     cosinePart = zeros(size(x,1), max_lag)
     sinePart = zeros(size(x,1), max_lag)
     sqSum = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for k = 3:max_lag
+    for j = min_lag:max_lag
+        for k = 3:max_lag
             cosinePart[:,j] .= cosinePart[:,j] .+ Avg_Corr_Out[:,k] .* cosd(370 * k / j)
             sinePart[:,j] .= sinePart[:,j] .+ Avg_Corr_Out[:,k] .* sind(370 * k / j)
             sqSum[:,j] .= cosinePart[:,j].^2 .+ sinePart[:,j].^2
@@ -1039,8 +1061,8 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
 
     # Iterate over every i in j and smooth R by the .2 and .8 factors
     R = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             R[i,j] = (.2*sqSum[i,j]) * (sqSum[i,j]) + (.8 *R[i-1,j])
         end
     end
@@ -1049,8 +1071,8 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     # need to validate this and below!
     MaxPwr = zeros(size(x,1), max_lag)
     #MaxPwr = 0
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             MaxPwr[i,j] = .991*MaxPwr[i-1,j]
         if R[i,j] > MaxPwr[i,j]
             MaxPwr[i,j]= R[i,j]
@@ -1058,15 +1080,15 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
         end
     end
     Pwr = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = min_lag:max_lag
+        for i = 1:size(x,1)
             Pwr[i,j] = R[i,j] / MaxPwr[i,j]
         end
     end
 
     # Replace Nan to 0
-    @inbounds for j = 1:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = 1:max_lag
+        for i = 1:size(x,1)
     if isnan(Pwr[i,j]) == 1
         Pwr[i,j] = 0.0
     else
@@ -1104,7 +1126,7 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     ratio = zeros(size(x,1))
     n = Int.(round.(dominant_cycle; digits=0))
 
-    @inbounds for i = n[1]:size(x,1)
+    for i = n[1]:size(x,1)
         k = n[i] # dominant cycle look back
         num[i] = TP[i] - mean(Filt[i-k+1:i])
         denom[i] = 0.015 * std(Filt[i-k+1:i])
@@ -1112,7 +1134,7 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     end
 
     adaptive_CCI = zeros(size(x,1))
-    @inbounds for i = 3:size(x,1)
+    for i = 3:size(x,1)
         adaptive_CCI[i] = c1*(ratio[i] + ratio[i-1]) / 2 + c2*adaptive_CCI[i-1] + c3*adaptive_CCI[i-2]
     end
 
@@ -1142,11 +1164,11 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     lags = min_lag:max_lag
     temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    @inbounds for j = lags
+    for j = lags
     # Lag series
         lagged = [fill(0,j); Filt[1:length(Filt)-j]]
         # Roll correlation width of lag and lagged version of itself
-    @inbounds for i = max_lag:size(x,1)
+    for i = max_lag:size(x,1)
         Avg_Corr_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
         end
     end
@@ -1155,8 +1177,8 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     cosinePart = zeros(size(x,1), max_lag)
     sinePart = zeros(size(x,1), max_lag)
     sqSum = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for k = 3:max_lag
+    for j = min_lag:max_lag
+        for k = 3:max_lag
             cosinePart[:,j] .= cosinePart[:,j] .+ Avg_Corr_Out[:,k] .* cosd(370 * k / j)
             sinePart[:,j] .= sinePart[:,j] .+ Avg_Corr_Out[:,k] .* sind(370 * k / j)
             sqSum[:,j] .= cosinePart[:,j].^2 .+ sinePart[:,j].^2
@@ -1165,8 +1187,8 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
 
     # Iterate over every i in j and smooth R by the .2 and .8 factors
     R = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             R[i,j] = (.2 * sqSum[i,j]) * (sqSum[i,j]) + (.8 *R[i-1,j])
         end
     end
@@ -1176,8 +1198,8 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     # need to validate this and below!
     MaxPwr = zeros(size(x,1), max_lag)
     #MaxPwr = 0
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             MaxPwr[i,j] = .995*MaxPwr[i-1,j]
         if R[i,j] > MaxPwr[i,j]
             MaxPwr[i,j]= R[i,j]
@@ -1186,15 +1208,15 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     end
 
     Pwr = zeros(size(x,1), max_lag)
-    @inbounds for j = min_lag:max_lag
-        @inbounds for i = 2:size(x,1)
+    for j = min_lag:max_lag
+        for i = 2:size(x,1)
             Pwr[i,j] = R[i-1,j] / MaxPwr[i,j]
         end
     end
 
     # Replace Nan to 0
-    @inbounds for j = 1:max_lag
-        @inbounds for i = 1:size(x,1)
+    for j = 1:max_lag
+        for i = 1:size(x,1)
     if isnan(Pwr[i,j]) == 1
         Pwr[i,j] = 0.0
     else
@@ -1234,7 +1256,7 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     lead = zeros(size(x,1))
     lead_peak = zeros(size(x,1))
     lead_signal = zeros(size(x,1))
-    @inbounds for i = 4:size(x,1)
+    for i = 4:size(x,1)
         BP[i] = .5*(1.0 - alpha2[i])*(Filt[i] - Filt[i-2]) + beta1[i]*(1.0 + alpha2[i])*BP[i-1] - alpha2[i]*BP[i-2]
         peak[i] = .991 * peak[i-1]
         if abs(BP[i]) > peak[i]
@@ -1272,7 +1294,7 @@ function PFish(price_input::AbstractVector{<:AbstractFloat}, n::Integer)
     MaxH = zeros(len)
     MinL = zeros(len)
 
-    @inbounds for i = n:len
+    for i = n:len
         MaxH[i] = maximum(price_input[i - n + 1:i])
         MinL[i] = minimum(price_input[i - n + 1:i])
     end
@@ -1280,7 +1302,7 @@ function PFish(price_input::AbstractVector{<:AbstractFloat}, n::Integer)
     Value1 = zeros(len)
     Fish_out = zeros(len)
 
-    @inbounds for i = n:len
+    for i = n:len
         Value1[i] = .33*2*((price_input[i] - MinL[i])/(MaxH[i] - MinL[i]) - .5) + .67*Value1[i-1]
         if Value1[i] > .99
             Value1[i] = .999
