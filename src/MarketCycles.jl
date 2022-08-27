@@ -3,6 +3,7 @@ VERSION >= v"0.0.2" && __precompile__(true)
 module MarketCycles
 
 export
+    syntheticdata!,
     SuperSmoother,
     Decycler,
     DecyclerOSC,
@@ -16,7 +17,6 @@ export
     ModifiedStochastic,
     ModifiedRSI,
     AutoCorrelationIndicator,
-    SingleLagAutoCorrelationIndicator,
     AutoCorrelationPeriodogram,
     AutoCorrelationReversals,
     DFTS,

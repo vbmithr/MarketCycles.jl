@@ -6,7 +6,7 @@
 # 9-1 onwards
 ##############################
 
-using Statistics, DataStructures
+using Random, Distributions, Statistics, DataStructures
 
 macro in_range(x, a, b, msgs...)
     msg_body = isempty(msgs) ? x : msgs[1]
@@ -74,6 +74,14 @@ function highpass2(in::AbstractVector{<:AbstractFloat},
          -  (1 - α)^2     * out[i-2]
     end
     nothing
+end
+
+function syntheticdata!(out::AbstractVector{<:AbstractFloat},
+                        α::AbstractFloat,
+                        start::Real,
+                        d::Normal{<:AbstractFloat}=Normal(start, .01start))
+    rand!(d, out)
+    accumulate!((x,y)-> α*y + (1-α)*x, out, out)
 end
 
 """
@@ -178,6 +186,7 @@ function BandPassFilter(in::AbstractVector{<:AbstractFloat};
                         out::AbstractVector{<:AbstractFloat},
                         period::Integer,
                         δ::AbstractFloat)
+    len = length(in)
     @in_range δ 0 1 "δ must be a proportion of period"
     @in_range period 0 length(in) "Period out of bounds"
 
@@ -187,8 +196,8 @@ function BandPassFilter(in::AbstractVector{<:AbstractFloat};
     σ = γinv - √(γinv^2 - 1) # Eq. 5-1
 
     # Compute the filters
-    HP = zeros(length(in))
-    BP = zeros(length(in))
+    HP = zeros(len)
+    BP = zeros(len)
 
     # Compute highpass
     α2 = compute_alpha(δ*π/2 / period)
@@ -200,8 +209,8 @@ function BandPassFilter(in::AbstractVector{<:AbstractFloat};
     end
 
     # Signal
-    Signal = zeros(size(x,1))
-    Peak = zeros(size(x,1))
+    Signal = zeros(len)
+    Peak = zeros(len)
     for i in 2:length(BP)
         Peak[i] = .991 * Peak[i-1]
         if abs(BP[i]) > Peak[i]
@@ -215,7 +224,7 @@ function BandPassFilter(in::AbstractVector{<:AbstractFloat};
     end
 
     # Replace Nan to 0
-    for i in 1:length(Signal)
+    for i in 1:len
         if isnan(Signal[i]) == 1
             Signal[i] = 0.0
         else
@@ -225,7 +234,7 @@ function BandPassFilter(in::AbstractVector{<:AbstractFloat};
 
     # Trigger
     α2 = compute_alpha(3π * δ / period)
-    for i = 2:length(x)
+    for i = 2:len
         BP_Trigger[i] = (1 + α2 / 2) * (Signal[i] - Signal[i-1]) + (1 - α2) * BP_Trigger[i-1]
     end
     nothing
@@ -249,51 +258,39 @@ function HurstCoefficient(in::AbstractVector{<:AbstractFloat},
     len = length(in)
     @check n<len && n>0 "Argument n out of bounds."
     @check iseven(n) "n must be an even number."
+    hn = n ÷ 2
 
-    half_n = Int(n/2)
-
-    # Find rolling maximum and minimum
-    HH = zeros(len)
-    LL = zeros(len)
-    N3 = zeros(len)
+    # Find rolling maximum and minimum for period n
+    n1 = zeros(len)
+    n2 = zeros(len)
+    n3 = zeros(len)
     for i = n:len
-        HH[i] = maximum(x[i-n+1:i])
-        LL[i] = minimum(x[i-n+1:i])
-        N3[i] = (HH[i] - LL[i]) / n
+        max = maximum( x[i-n+1:i])
+        min = minimum( x[i-n+1:i])
+        n3[i] = (max-min) / n
+
+        max = maximum( x[i-n+1:i-hn])
+        min = minimum( x[i-n+1:i-hn])
+        n1[i] = (max-min) / hn
+
+        max = maximum( x[i-hn+1:i])
+        min = minimum( x[i-hn+1:i])
+        n2[i] = (max-min) / hn
     end
 
-    # Rolling min and max half of n
-    HH = zeros(len)
-    LL = zeros(len)
-    N1 = zeros(len)
-    for i = half_n:len
-        HH[i] = maximum(x[i-half_n+1:i])
-        LL[i] = minimum(x[i-half_n+1:i])
-        N1[i] = (HH[i] - LL[i]) / half_n
-    end
-
-    # Set trailing close half of n
-    HH = [fill(0,half_n); x[1:length(x)-half_n]]
-    LL = [fill(0,half_n); x[1:length(x)-half_n]]
-    HH_out = zeros(len)
-    LL_out = zeros(len)
-    N2 = zeros(len)
-    for i = half_n:len
-        HH_out[i] = maximum(HH[i-half_n+1:i])
-        LL_out[i] = minimum(LL[i-half_n+1:i])
-        N2[i] = (HH_out[i] - LL_out[i])/(half_n)
+    # Fractal dimension
+    # Why is the computation involving previous point?!
+    for i = n+1:len
+        out[i] = n1[i] + n2[i] > 0 && n3[i] > 0 ?
+            .5 * ((log(n1[i] + n2[i]) - log(n3[i])) / log(n / hn) + out[i-1]) : 0
     end
 
     # Hurst
-    Dimen = zeros(len)
-    Hurst = zeros(len)
-    for i = 3:len
-        if N1[i] > 0 && N2[i] > 0 && N3[i] > 0
-            Dimen[i] = .5*((log(N1[i]+ N2[i]) - log(N3[i])) / log(2) + Dimen[i-1])
-            Hurst[i] = 2 - Dimen[i]
-        end
+    for i = n+1:len
+        out[i] = 2 - out[i]
     end
-    SuperSmoother(Hurst, out, LPPeriod)
+
+    # Caller will SuperSmooth the result if needed.
     nothing
 end
 
@@ -373,26 +370,6 @@ function RoofingFilterIndicator(in::AbstractVector{<:AbstractFloat},
     nothing
 end
 
-function minimum(cb::CircularBuffer{<:AbstractFloat})
-    min = typemax(eltype(cb))
-    for i in eachindex(cb)
-        if cb[i] < min
-            min = cb[i]
-        end
-    end
-    min
-end
-
-function maximum(cb::CircularBuffer{<:AbstractFloat})
-    max = typemin(eltype(cb))
-    for i in eachindex(cb)
-        if cb[i] > max
-            max = cb[i]
-        end
-    end
-    max
-end
-
 """
     modifiedstochastic(x::array{float64}; n::int=20, hpperiod::int=48, lpperiod::int=10)::array{float64}
 
@@ -410,30 +387,16 @@ function ModifiedStochastic(in::AbstractVector{<:AbstractFloat},
     filtered = zeros(len)
     RoofingFilterIndicator(in, filtered, long, short)
 
-    cb = CircularBuffer{eltype(in)}(n)
-    for i = 1:n-1
-        push!(cb, filtered[i])
-    end
-
     stoc = zeros(len)
     for i = n:len
-        push!(cb, in[i])
-        l = minimum(cb)
-        h = maximum(cb)
+        x =  in[i-n+1:i]
+        l = minimum(x)
+        h = maximum(x)
         stoc[i] = (in[i] - l) / (h - l)
     end
 
     SuperSmoother(stoc, out, short)
     nothing
-end
-
-function sums(cb::CircularBuffer{<:AbstractFloat})
-    sum_pos = 0
-    sum_neg = 0
-    for x in cb
-        x > 0 ? sum_pos += x : sum_neg += -x
-    end
-    (sum_pos, sum_neg)
 end
 
 """
@@ -456,78 +419,122 @@ function ModifiedRSI(in::AbstractVector{<:AbstractFloat},
     filtered = zeros(len)
     RoofingFilterIndicator(in, filtered, long, short)
 
-    cb = CircularBuffer{eltype(in)}(n-1)
-    for i = 2:n-1
-        push!(cb, filtered[i] - filtered[i-1])
-    end
-
     # RSI
     MyRSI = zeros(len)
     for i = n:len
-        push!(cb, filtered[i] - filtered[i-1])
-        cu, cd = sums(cb)
+        cu = cd = 0
+        for x in filtered[i-n+1:i]
+            x > 0 ? cu += x : cd += -x
+        end
         MyRSI[i] = cu+cd != 0 ? cu / (cu + cd) : 0
     end
     SuperSmoother(MyRSI, out, short)
     nothing
 end
 
-@doc """
-    AutoCorrelationIndicator(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
-
-Autocorrelation Indicator - Equation 8-2
 """
-function AutoCorrelationIndicator(in::AbstractVector{<:AbstractFloat},
-                                  out::AbstractVector{<:AbstractFloat},
-                                  min_lag::Integer,
-                                  max_lag::Integer,
-                                  HPPeriod::Integer,
-                                  LPPeriod::Integer)
-    @check max_lag<size(x,1) && max_lag>0 "Argument max_lag out of bounds."
-
-    # Apply Roofing Filter Indicator
-    Filt = zeros(len)
-    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
-
-    # Pearson correlation for each value of lag
-    AutoCorrOut = zeros(size(x,1), max_lag)
-    for j = min_lag:max_lag
-        # Lag series
-        lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-
-        # Roll correlation width of lag and lagged version of itself
-        for i = max_lag:size(x,1)
-            AutoCorrOut[i,j] = cor(lagged[i-j+1:i], Filt[i-j+1:i])
-            # Scale each correlation to range between 0 and 1
-            AutoCorrOut[i,j]= .5*(AutoCorrOut[i,j] + 1)
-        end
-    end
-    AutoCorrOut
-end
-
-@doc """
     SingleLagAutoCorrelationIndicator(x::Array{Float64}; lag::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
 
 Single Lag Autocorrelation Indicator - Equation 8-2
 """
-function SingleLagAutoCorrelationIndicator(x::Array{Float64}; lag::Int=10, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
-    @check lag<size(x,1) && lag>0 "Argument n out of bounds."
+function AutoCorrelationIndicator(out::AbstractVector{<:AbstractFloat},
+                                  in::AbstractVector{<:AbstractFloat},
+                                  lag::Integer,
+                                  long::Integer,
+                                  short::Integer,
+                                  avglen::Integer=0;
+                                  scale=false)
+    len = length(in)
+    @check length(out) >= len
+    @in_range lag 0 len
+    @in_range length 1 lag
 
     # Apply Roofing Filter Indicator
-    Filt = zeros(len)
-    RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
+    filt = zeros(len)
+    RoofingFilterIndicator(in, filt, long, short)
 
-    # Pearson correlation for specified lag
-    AutoCorrOut = zeros(size(x,1))
     # Lag series
-    lagged = [fill(0,lag); Filt[1:length(Filt)-lag]]
+    lagged = circshift(filt, lag)
+    lagged[1:lag] .= 0
+
     # Roll correlation width of lag and lagged version of itself
-    for i = lag:size(x,1)
-        AutoCorrOut[i] = cor(lagged[i-lag+1:i], Filt[i-lag+1:i])
-        #Scale each correlation to range between 0 and 1
-        AutoCorrOut[i]= .5*(AutoCorrOut[i] + 1)
+    period = avglen == 0 ? lag : min(lag, avglen)
+    for i = period:len
+        @views out[i] = cor(lagged[i-avglen+1:i], filt[i-avglen+1:i])
+        if scale
+            out[i, lag] = .5 * (out[i, lag] + 1)
+        end
     end
-    return AutoCorrOut
+    nothing
+end
+
+"""
+    AutoCorrelationIndicator(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
+
+Autocorrelation Indicator - Equation 8-2
+"""
+function AutoCorrelationIndicator(out::AbstractMatrix{<:AbstractFloat},
+                                  in::AbstractVector{<:AbstractFloat},
+                                  lags::AbstractRange{<:Integer},
+                                  long::Integer,
+                                  short::Integer,
+                                  avglen::Integer=0;
+                                  scale=false)
+    len = length(in)
+    @check length(out) >= len
+    @check avglen == 0 || avglen <= lags[begin]
+
+    # Apply Roofing Filter Indicator
+    filt = zeros(len)
+    RoofingFilterIndicator(in, filt, long, short)
+
+    for lag = lags
+        # Lag series
+        lagged = circshift(filt, lag)
+        lagged[1:lag] .= 0
+
+        # Roll correlation width of lag and lagged version of itself
+        period = avglen == 0 ? lag : min(lag, avglen)
+        for i = period:len
+            @views out[i, lag] = cor(lagged[i-period+1:i], filt[i-period+1:i])
+            if scale
+                out[i, lag] = .5 * (out[i, lag] + 1)
+            end
+        end
+    end
+    nothing
+end
+
+
+"""
+    AutoCorrelationIndicator(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48, HPPeriod::Int=48, LPPeriod::Int=10)::Array{Float64}
+
+Autocorrelation Indicator - Equation 8-2
+"""
+function AutoCorrelationIndicator(out::AbstractMatrix{<:AbstractFloat},
+                                  in::AbstractVector{<:AbstractFloat},
+                                  lags::AbstractRange{<:Integer},
+                                  avglen::Integer=0;
+                                  scale=false)
+    len = length(in)
+    @check length(out) >= len
+    @check avglen == 0 || avglen <= lags[begin]
+
+    for lag = lags
+        # Lag series
+        lagged = circshift(filt, lag)
+        lagged[1:lag] .= 0
+
+        # Roll correlation width of lag and lagged version of itself
+        period = avglen == 0 ? lag : min(lag, avglen)
+        for i = period:len
+            @views out[i, lag] = cor(lagged[i-period+1:i], filt[i-period+1:i])
+            if scale
+                out[i, lag] = .5 * (out[i, lag] + 1)
+            end
+        end
+    end
+    nothing
 end
 
 @doc """
@@ -543,19 +550,8 @@ function AutoCorrelationPeriodogram(x::Array{Float64}; min_lag::Int=3, max_lag::
     RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Pearson correlation for each value of lag
-    # Initialize correlation sums
-    lags = min_lag:max_lag
-    avglength = 3
-    temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    for j = lags
-        # Lag series
-        lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-        # Roll correlation width of lag and lagged version of itself
-        for i = max_lag:size(x,1)
-            Avg_Corr_Out[i,j] = cor(lagged[i-avglength+1:i], Filt[i-avglength+1:i])
-        end
-    end
+    AutoCorrelationIndicator(Avg_Corr_Out, Filt, min_lag:max_lag, 3)
 
     # Calcualte sine and cosine part
     cosinePart = zeros(size(x,1), max_lag)
@@ -646,18 +642,8 @@ function AutoCorrelationReversals(x::Array{Float64}; min_lag::Int=3, max_lag::In
     RoofingFilterIndicator(in, Filt, HPPeriod, LPPeriod)
 
     # Pearson correlation for each value of lag
-    lags = min_lag:max_lag
-    Avg_Corr_Rev_Out = zeros(size(x,1), max_lag)
-    for j = lags
-        # Lag series
-        lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-        # Roll correlation width of lag and lagged version of itself
-        for i = AvgLength:size(x,1)
-            Avg_Corr_Rev_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
-            # Scale each correlation to range between 0 and 1
-            Avg_Corr_Rev_Out[i,j] = .5*(Avg_Corr_Rev_Out[i,j] + 1)
-        end
-    end
+    Avg_Corr_Out = zeros(size(x,1), max_lag)
+    AutoCorrelationIndicator(Avg_Corr_Out, Filt, min_lag:max_lag, AvgLength, scale=true)
 
     # mark all > .5 and <.5 crossings
     SumDeltas = zeros(size(x,1), max_lag)
@@ -775,18 +761,8 @@ function AdaptiveRSI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     RoofingFilterIndicator(in, Filt, HPLength, LPLength)
 
     # Pearson correlation for each value of lag
-    # Initialize correlation sums
-    lags = min_lag:max_lag
-    temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    for j = lags
-    # Lag series
-        lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-        # Roll correlation width of lag and lagged version of itself
-    for i = max_lag:size(x,1)
-        Avg_Corr_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
-        end
-    end
+    AutoCorrelationIndicator(Avg_Corr_Out, Filt, min_lag:max_lag, AvgLength)
 
     # Calcualte sine and cosine part
     cosinePart = zeros(size(x,1), max_lag)
@@ -919,18 +895,8 @@ function AdaptiveStochastic(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,L
     RoofingFilterIndicator(in, Filt, HPLength, LPLength)
 
     # Pearson correlation for each value of lag
-    # Initialize correlation sums
-    lags = min_lag:max_lag
-    temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
-    for j = lags
-    # Lag series
-        lagged = [fill(0,j); Filt[1:length(Filt)-j]]
-        # Roll correlation width of lag and lagged version of itself
-    for i = max_lag:size(x,1)
-        Avg_Corr_Out[i,j] = cor(lagged[i-AvgLength+1:i], Filt[i-AvgLength+1:i])
-        end
-    end
+    AutoCorrelationIndicator(Avg_Corr_Out, Filt, min_lag:max_lag, AvgLength)
 
     # Calcualte sine and cosine part
     cosinePart = zeros(size(x,1), max_lag)
@@ -1036,7 +1002,6 @@ function AdaptiveCCI(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPLength
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
-    temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
     for j = lags
     # Lag series
@@ -1162,7 +1127,6 @@ function AdaptiveBPFilter(x::Array{Float64}; min_lag::Int=1, max_lag::Int=48,LPL
     # Pearson correlation for each value of lag
     # Initialize correlation sums
     lags = min_lag:max_lag
-    temp = zeros(size(x,1))
     Avg_Corr_Out = zeros(size(x,1), max_lag)
     for j = lags
     # Lag series
